@@ -15,6 +15,7 @@ using TMPro;
 using Unity.VisualScripting;
 using static NetServer;
 using System.Threading;
+using UnityEditor.PackageManager;
 
 public class NetServer : MonoBehaviour
 {
@@ -29,6 +30,9 @@ public class NetServer : MonoBehaviour
     static Socket serverUDPSocket;
     static UdpClient serverUDP;
 
+
+    
+
     //static IPEndPoint clientUDPEP;
 
     public static byte[] udpBuffer = new byte[512];
@@ -42,6 +46,7 @@ public class NetServer : MonoBehaviour
         public string playerName;
         public Socket playerTCPSocket;
 
+        public bool udpIsSetup;
         public IPEndPoint playerEP;
         //public static EndPoint playerEP;
 
@@ -55,10 +60,17 @@ public class NetServer : MonoBehaviour
             playerID = consID;
             playerName = string.Empty;
             playerTCPSocket = consSocket;
+            udpIsSetup = false;
             playerEP = new IPEndPoint(IPAddress.Any, 0);
             playerInput = new float[2];
             playerPosition = new float[3];
             playerRotation = new float[3];
+        }
+
+        public void SetPlayerUDPEndpoint(IPEndPoint endPoint)
+        {
+            playerEP = endPoint;
+            udpIsSetup = true;
         }
     }
 
@@ -71,6 +83,9 @@ public class NetServer : MonoBehaviour
 
     public static Dictionary<short, Player> playerDList = new Dictionary<short, Player>();
     public static Dictionary<int, Room> roomDList = new Dictionary<int, Room>();
+
+    public static float udpSendTimeInterval = 1;
+    public static float udpSendTimer = 0.0f;
 
     private void Awake()
     {
@@ -85,17 +100,17 @@ public class NetServer : MonoBehaviour
 
     private void Update()
     {
-        
+        udpSendTimer += Time.deltaTime;
     }
 
     public void StartServer()
     {
-        IPAddress ip = IPAddress.Parse("192.168.2.43");
+        IPAddress ip = IPAddress.Parse("127.0.0.1");
         IPEndPoint serverEP = new IPEndPoint(ip, 12581);
         serverTCPSocket = new Socket(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-        serverUDPSocket = new Socket(ip.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+        //serverUDPSocket = new Socket(ip.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
 
-        //serverUDP = new UdpClient(serverEP);
+        serverUDP = new UdpClient(serverEP);
 
         try
         {
@@ -104,7 +119,7 @@ public class NetServer : MonoBehaviour
             serverTCPSocket.Listen(50);
 
             //clientUDPEP = new IPEndPoint(IPAddress.Any, 0);
-            serverUDPSocket.Bind(serverEP);
+            //serverUDPSocket.Bind(serverEP);
 
             Task.Run(() => { tcpAccept(); }, cts.Token);
 
@@ -114,6 +129,7 @@ public class NetServer : MonoBehaviour
         catch (Exception ex)
         {
             ConPrint(ex.ToString());
+            throw;
         }
     }
 
@@ -135,12 +151,13 @@ public class NetServer : MonoBehaviour
 
             Task.Run(() => { tcpAccept(); }, cts.Token);
 
-            Task.Run(() => { udpSend(); }, cts.Token);
+            //Task.Run(() => { udpSend(); }, cts.Token);
         }
         catch (Exception ex)
         {
             UnityMainThreadDispatcher.Instance().Enqueue(()
                 => ConPrint(ex.ToString()));
+            throw;
         }
         
     }
@@ -188,6 +205,7 @@ public class NetServer : MonoBehaviour
         {
             UnityMainThreadDispatcher.Instance().Enqueue(()
                 => ConPrint(ex.ToString()));
+            throw;
         }
         
     }
@@ -204,10 +222,10 @@ public class NetServer : MonoBehaviour
             Array.Clear(udpBuffer, 0, udpBuffer.Length);
 
             //IPEndPoint clientEP = new IPEndPoint(IPAddress.Any, 0);
-            EndPoint clientEP = new IPEndPoint(IPAddress.Any, 0);
-            //udpBuffer = serverUDP.Receive(ref clientEP);
-            int recv = serverUDPSocket.ReceiveFrom(udpBuffer, ref clientEP);
-            //int recv = udpBuffer.Length;
+            IPEndPoint clientEP = new IPEndPoint(IPAddress.Any, 0);
+            udpBuffer = serverUDP.Receive(ref clientEP);
+            //int recv = serverUDPSocket.ReceiveFrom(udpBuffer, ref clientEP);
+            int recv = udpBuffer.Length;
 
             short[] shortBuffer = new short[2];
             Buffer.BlockCopy(udpBuffer, 0, shortBuffer, 0, 4);
@@ -219,9 +237,13 @@ public class NetServer : MonoBehaviour
                 
                 if(clientEP is IPEndPoint ipEP)
                 {
-                    playerDList[shortBuffer[1]].playerEP.Address = ipEP.Address;
-                    playerDList[shortBuffer[1]].playerEP.Port = ipEP.Port;
+                    //playerDList[shortBuffer[1]].playerEP.Address = ipEP.Address;
+                    //playerDList[shortBuffer[1]].playerEP.Port = ipEP.Port;
+                    //playerDList[shortBuffer[1]].SetPlayerUDPEndpoint(ipEP);
                 }
+
+                playerDList[shortBuffer[1]].SetPlayerUDPEndpoint(clientEP);
+                
                 
 
             }
@@ -247,6 +269,41 @@ public class NetServer : MonoBehaviour
                                  + playerDList[shortBuffer[1]].playerRotation[1] + " "
                                  + playerDList[shortBuffer[1]].playerRotation[2]));
                     }
+
+                    /*
+                    byte[] tempBuffer = new byte[512];
+                    tempBuffer = Encoding.ASCII.GetBytes("UDP SEND TEST!");
+                    serverUDP.Send(tempBuffer, tempBuffer.Length, clientEP);
+                    */
+
+                    
+                    byte[] transBuffer = new byte[26];
+                    short[] headerBuffer = new short[1];
+                    foreach (Player selectedPlayer in playerDList.Values)
+                    {
+                        
+                    }
+
+                    foreach (Player player in playerDList.Values)
+                    {
+                        if (player.playerID != playerDList[shortBuffer[1]].playerID)
+                        {
+                            headerBuffer[0] = player.playerID;
+                            Buffer.BlockCopy(headerBuffer, 0, transBuffer, 0, 2);
+                            Buffer.BlockCopy(player.playerPosition, 0, transBuffer, 2, 12);
+                            Buffer.BlockCopy(player.playerRotation, 0, transBuffer, 14, 12);
+                            //serverUDP.Send(transBuffer, transBuffer.Length, selectedPlayer.playerEP);
+                            //EndPoint ep = selectedPlayer.playerEP;
+                            //serverUDPSocket.SendTo(transBuffer, ep);
+                            serverUDP.Send(transBuffer, transBuffer.Length, clientEP);
+                            Debug.Log("Send to: " + clientEP.Address +  "\nInfo: " + playerDList[shortBuffer[1]].playerID + " " + clientEP.Address + " " + clientEP.Port + " \n"
+                                + player.playerPosition[0] + " " + player.playerPosition[1] + " " + player.playerPosition[2]
+                                + "\n" + player.playerRotation);
+
+                        }
+                    }
+
+
                     break;
 
                 default:
@@ -258,6 +315,7 @@ public class NetServer : MonoBehaviour
 
             UnityMainThreadDispatcher.Instance().Enqueue(()
                 => ConPrint(ex.ToString()));
+            throw;
         }
 
         udpReceive();
@@ -265,34 +323,62 @@ public class NetServer : MonoBehaviour
 
     public static void udpSend()
     {
-        try
+        if(udpSendTimer >= udpSendTimeInterval)
         {
-            byte[] transBuffer = new byte[26];
-
-            foreach (Player selectedPlayer in playerDList.Values)
+            try
             {
+                byte[] tempBuffer = new byte[512];
+                tempBuffer = Encoding.ASCII.GetBytes("UDP SEND TEST!");
+
+                
+
                 foreach (Player player in playerDList.Values)
                 {
-                    if(player.playerID != selectedPlayer.playerID)
+                    if(player.udpIsSetup) serverUDP.Send(tempBuffer, tempBuffer.Length, player.playerEP);
+
+
+                }    
+
+                /*
+                byte[] transBuffer = new byte[512];
+                transBuffer = Encoding.ASCII.GetBytes("UDP SEND TEST!");
+
+                foreach (Player player in playerDList.Values)
+                {
+                    //serverUDPSocket.SendTo(transBuffer, player.playerEP);
+                    serverUDP.Send(transBuffer, transBuffer.Length, player.playerEP);
+                }
+
+                
+                foreach (Player selectedPlayer in playerDList.Values)
+                {
+                    foreach (Player player in playerDList.Values)
                     {
-                        short[] headerBuffer = {player.playerID};
-                        Buffer.BlockCopy(headerBuffer, 0, transBuffer, 0, 2);
-                        Buffer.BlockCopy(player.playerPosition, 0, transBuffer, 2, 12);
-                        Buffer.BlockCopy(player.playerRotation, 0, transBuffer, 14, 12);
-                        //serverUDP.Send(transBuffer, transBuffer.Length, selectedPlayer.playerEP);
-                        EndPoint ep = selectedPlayer.playerEP;
-                        serverUDPSocket.SendTo(transBuffer, ep);
-                        Debug.Log("Send to: " + selectedPlayer.playerID + " " + selectedPlayer.playerEP.Address + " " + selectedPlayer.playerEP.Port);
+                        if(player.playerID != selectedPlayer.playerID)
+                        {
+                            short[] headerBuffer = {player.playerID};
+                            Buffer.BlockCopy(headerBuffer, 0, transBuffer, 0, 2);
+                            Buffer.BlockCopy(player.playerPosition, 0, transBuffer, 2, 12);
+                            Buffer.BlockCopy(player.playerRotation, 0, transBuffer, 14, 12);
+                            //serverUDP.Send(transBuffer, transBuffer.Length, selectedPlayer.playerEP);
+                            EndPoint ep = selectedPlayer.playerEP;
+                            serverUDPSocket.SendTo(transBuffer, ep);
+                            Debug.Log("Send to: " + selectedPlayer.playerID + " " + selectedPlayer.playerEP.Address + " " + selectedPlayer.playerEP.Port);
+                        }
                     }
                 }
+                */
             }
-        }
-        catch (Exception ex)
-        {
+            catch (Exception ex)
+            {
 
-            Debug.Log(ex.ToString());
-            //throw;
+                Debug.Log(ex.ToString());
+                throw;
+            }
+
+            udpSendTimer -= udpSendTimeInterval;
         }
+        
 
         udpSend();
     }
