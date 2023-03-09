@@ -13,6 +13,8 @@ using System.Threading.Tasks;
 
 using TMPro;
 using Unity.VisualScripting;
+using static NetServer;
+using System.Threading;
 
 public class NetServer : MonoBehaviour
 {
@@ -25,13 +27,23 @@ public class NetServer : MonoBehaviour
 
     static Socket serverTCPSocket;
     static Socket serverUDPSocket;
+    static UdpClient serverUDP;
+
+    //static IPEndPoint clientUDPEP;
+
+    public static byte[] udpBuffer = new byte[512];
+
+    static CancellationTokenSource cts = new CancellationTokenSource();
 
     public struct Player
     {
-        public byte[] buffer;
+        public byte[] tcpBuffer;
         public short playerID;
         public string playerName;
-        public Socket playerSocket;
+        public Socket playerTCPSocket;
+
+        public IPEndPoint playerEP;
+        //public static EndPoint playerEP;
 
         public float[] playerInput;
         public float[] playerPosition;
@@ -39,10 +51,11 @@ public class NetServer : MonoBehaviour
 
         public Player(short consID, Socket consSocket)
         {
-            buffer = new byte[1024];
+            tcpBuffer = new byte[512];
             playerID = consID;
             playerName = string.Empty;
-            playerSocket = consSocket;
+            playerTCPSocket = consSocket;
+            playerEP = new IPEndPoint(IPAddress.Any, 0);
             playerInput = new float[2];
             playerPosition = new float[3];
             playerRotation = new float[3];
@@ -77,10 +90,12 @@ public class NetServer : MonoBehaviour
 
     public void StartServer()
     {
-        IPAddress ip = IPAddress.Parse("127.0.0.1");
-        IPEndPoint serverEP = new IPEndPoint(ip, 8888);
+        IPAddress ip = IPAddress.Parse("192.168.2.43");
+        IPEndPoint serverEP = new IPEndPoint(ip, 12581);
         serverTCPSocket = new Socket(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
         serverUDPSocket = new Socket(ip.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+
+        //serverUDP = new UdpClient(serverEP);
 
         try
         {
@@ -88,8 +103,10 @@ public class NetServer : MonoBehaviour
             serverTCPSocket.Bind(serverEP);
             serverTCPSocket.Listen(50);
 
+            //clientUDPEP = new IPEndPoint(IPAddress.Any, 0);
+            serverUDPSocket.Bind(serverEP);
 
-            Task.Run(() => { tcpAccept(); });
+            Task.Run(() => { tcpAccept(); }, cts.Token);
 
             ConPrint("[SYSTEM] TCP Server Started");
             
@@ -114,13 +131,16 @@ public class NetServer : MonoBehaviour
             UnityMainThreadDispatcher.Instance().Enqueue(()
                 => ConPrint("[SYSTEM] Client Accepted From: " + acceptedSocket.ToString()));
             
-            Task.Run(() => { tcpReceive(playerDList[playerid]); });
+            Task.Run(() => { tcpReceive(playerDList[playerid]); }, cts.Token);
 
-            Task.Run(() => { tcpAccept(); });
+            Task.Run(() => { tcpAccept(); }, cts.Token);
+
+            Task.Run(() => { udpSend(); }, cts.Token);
         }
         catch (Exception ex)
         {
-            Debug.Log(ex.ToString());
+            UnityMainThreadDispatcher.Instance().Enqueue(()
+                => ConPrint(ex.ToString()));
         }
         
     }
@@ -129,19 +149,19 @@ public class NetServer : MonoBehaviour
     {
         try
         {
-            Array.Clear(player.buffer, 0, player.buffer.Length);
-            int recv = player.playerSocket.Receive(player.buffer);
+            Array.Clear(player.tcpBuffer, 0, player.tcpBuffer.Length);
+            int recv = player.playerTCPSocket.Receive(player.tcpBuffer);
 
             short[] header = new short[1];
-            Buffer.BlockCopy(player.buffer, 0, header, 0, 2);
-            byte[] byContent = new byte[player.buffer.Length - 2];
-            Buffer.BlockCopy(player.buffer, 2, byContent, 0, byContent.Length);
+            Buffer.BlockCopy(player.tcpBuffer, 0, header, 0, 2);
+            byte[] byContent = new byte[player.tcpBuffer.Length - 2];
+            Buffer.BlockCopy(player.tcpBuffer, 2, byContent, 0, byContent.Length);
 
             switch (header[0])
             {
                 // First Login
                 case 0:
-                    string name = Encoding.ASCII.GetString(player.buffer, 2, recv - 2);
+                    string name = Encoding.ASCII.GetString(player.tcpBuffer, 2, recv - 2);
                     player.playerName = name;
                     UnityMainThreadDispatcher.Instance().Enqueue(()
                         => ConPrint("Get name: " + name));
@@ -161,18 +181,120 @@ public class NetServer : MonoBehaviour
                     break;
             }
 
-            Task.Run(() => { tcpReceive(player); });
+            Task.Run(() => { tcpReceive(player); }, cts.Token);
+            Task.Run(() => { udpReceive(); }, cts.Token);
         }
         catch (Exception ex)
         {
-            Debug.Log(ex.ToString());
+            UnityMainThreadDispatcher.Instance().Enqueue(()
+                => ConPrint(ex.ToString()));
         }
         
     }
 
     public static void tcpSend(Player player, byte[] msg)
     {
-        player.playerSocket.Send(msg);
+        player.playerTCPSocket.Send(msg);
+    }
+
+    public static void udpReceive()
+    {
+        try
+        {
+            Array.Clear(udpBuffer, 0, udpBuffer.Length);
+
+            //IPEndPoint clientEP = new IPEndPoint(IPAddress.Any, 0);
+            EndPoint clientEP = new IPEndPoint(IPAddress.Any, 0);
+            //udpBuffer = serverUDP.Receive(ref clientEP);
+            int recv = serverUDPSocket.ReceiveFrom(udpBuffer, ref clientEP);
+            //int recv = udpBuffer.Length;
+
+            short[] shortBuffer = new short[2];
+            Buffer.BlockCopy(udpBuffer, 0, shortBuffer, 0, 4);
+            byte[] byContent = new byte[recv - 4];
+            Buffer.BlockCopy(udpBuffer, 4, byContent, 0, recv - 4);
+
+            if (playerDList.ContainsKey(shortBuffer[1]))
+            {
+                
+                if(clientEP is IPEndPoint ipEP)
+                {
+                    playerDList[shortBuffer[1]].playerEP.Address = ipEP.Address;
+                    playerDList[shortBuffer[1]].playerEP.Port = ipEP.Port;
+                }
+                
+
+            }
+
+            switch (shortBuffer[0])
+            {
+                // Update Position
+                case 0:
+                    if (playerDList.ContainsKey(shortBuffer[1]))
+                    {
+                        Buffer.BlockCopy(byContent, 0, playerDList[shortBuffer[1]].playerPosition, 0, 12);
+                        UnityMainThreadDispatcher.Instance().Enqueue(()
+                                 => ConPrint("ID: " + shortBuffer[1] + " Position: " 
+                                 + playerDList[shortBuffer[1]].playerPosition[0] + " " 
+                                 + playerDList[shortBuffer[1]].playerPosition[1] + " " 
+                                 + playerDList[shortBuffer[1]].playerPosition[2]));
+
+                        Buffer.BlockCopy(byContent, 12, playerDList[shortBuffer[1]].playerRotation, 0, 12);
+
+                        UnityMainThreadDispatcher.Instance().Enqueue(()
+                                 => ConPrint("ID: " + shortBuffer[1] + " Rotation: "
+                                 + playerDList[shortBuffer[1]].playerRotation[0] + " "
+                                 + playerDList[shortBuffer[1]].playerRotation[1] + " "
+                                 + playerDList[shortBuffer[1]].playerRotation[2]));
+                    }
+                    break;
+
+                default:
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+
+            UnityMainThreadDispatcher.Instance().Enqueue(()
+                => ConPrint(ex.ToString()));
+        }
+
+        udpReceive();
+    }
+
+    public static void udpSend()
+    {
+        try
+        {
+            byte[] transBuffer = new byte[26];
+
+            foreach (Player selectedPlayer in playerDList.Values)
+            {
+                foreach (Player player in playerDList.Values)
+                {
+                    if(player.playerID != selectedPlayer.playerID)
+                    {
+                        short[] headerBuffer = {player.playerID};
+                        Buffer.BlockCopy(headerBuffer, 0, transBuffer, 0, 2);
+                        Buffer.BlockCopy(player.playerPosition, 0, transBuffer, 2, 12);
+                        Buffer.BlockCopy(player.playerRotation, 0, transBuffer, 14, 12);
+                        //serverUDP.Send(transBuffer, transBuffer.Length, selectedPlayer.playerEP);
+                        EndPoint ep = selectedPlayer.playerEP;
+                        serverUDPSocket.SendTo(transBuffer, ep);
+                        Debug.Log("Send to: " + selectedPlayer.playerID + " " + selectedPlayer.playerEP.Address + " " + selectedPlayer.playerEP.Port);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+
+            Debug.Log(ex.ToString());
+            //throw;
+        }
+
+        udpSend();
     }
 
     public static void ConPrint(string cont)
@@ -180,6 +302,14 @@ public class NetServer : MonoBehaviour
         _CONSOLE.text += "\n" + cont;
 
         _CONSCROLL.value = 1f;
+    }
+
+    private void OnApplicationQuit()
+    {
+        cts.Cancel();
+        serverTCPSocket.Close();
+        serverUDPSocket.Close();
+        serverUDP.Close();
     }
 
 }
