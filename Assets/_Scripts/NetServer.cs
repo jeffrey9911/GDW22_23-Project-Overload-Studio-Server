@@ -44,6 +44,7 @@ public class NetServer : MonoBehaviour
         public byte[] tcpBuffer;
         public short playerID;
         public string playerName;
+        public string playerKartID;
         public Socket playerTCPSocket;
 
         public bool udpIsSetup;
@@ -57,8 +58,9 @@ public class NetServer : MonoBehaviour
         public Player(short consID, Socket consSocket)
         {
             tcpBuffer = new byte[512];
+            playerName = "NULL";
+            playerKartID = "NULL";
             playerID = consID;
-            playerName = string.Empty;
             playerTCPSocket = consSocket;
             udpIsSetup = false;
             playerEP = new IPEndPoint(IPAddress.Any, 0);
@@ -72,6 +74,15 @@ public class NetServer : MonoBehaviour
             playerEP = endPoint;
             udpIsSetup = true;
         }
+
+        public void SetPlayer(ref byte[] data)
+        {
+            string[] contents = Encoding.ASCII.GetString(data).Split("#");
+            this.playerName = contents[0];
+            this.playerKartID = contents[1];
+            Debug.Log(playerID + ": " + playerDList[playerID].playerName + " KID: " + playerDList[playerID].playerKartID);
+        }
+        
     }
 
     public struct Room
@@ -87,6 +98,9 @@ public class NetServer : MonoBehaviour
     public static float udpSendTimeInterval = 1;
     public static float udpSendTimer = 0.0f;
 
+    private static float tcpDlistSendInterval = 1;
+    private static float tcpDlistSendTimer = 0;
+
     private void Awake()
     {
         
@@ -101,11 +115,18 @@ public class NetServer : MonoBehaviour
     private void Update()
     {
         udpSendTimer += Time.deltaTime;
+        tcpDlistSendTimer += Time.deltaTime;
+
+        if(tcpDlistSendTimer >= tcpDlistSendInterval)
+        {
+            tcpPlayerDListSend();
+            tcpDlistSendTimer -= tcpDlistSendInterval;
+        }
     }
 
     public void StartServer()
     {
-        IPAddress ip = IPAddress.Parse("127.0.0.1");
+        IPAddress ip = IPAddress.Parse("192.168.2.43");
         IPEndPoint serverEP = new IPEndPoint(ip, 12581);
         serverTCPSocket = new Socket(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
         //serverUDPSocket = new Socket(ip.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
@@ -121,7 +142,9 @@ public class NetServer : MonoBehaviour
             //clientUDPEP = new IPEndPoint(IPAddress.Any, 0);
             //serverUDPSocket.Bind(serverEP);
 
-            Task.Run(() => { tcpAccept(); }, cts.Token);
+            Task.Run(() => { tcpAccept(); }, cts.Token);                                                    // tcp accept thread
+
+            Task.Run(() => { udpReceive(); }, cts.Token);                                                   // udp receive
 
             ConPrint("[SYSTEM] TCP Server Started");
             
@@ -133,7 +156,7 @@ public class NetServer : MonoBehaviour
         }
     }
 
-    public static void tcpAccept()
+    public static void tcpAccept()                                                                           // tcp accept
     {
         try
         {
@@ -147,9 +170,8 @@ public class NetServer : MonoBehaviour
             UnityMainThreadDispatcher.Instance().Enqueue(()
                 => ConPrint("[SYSTEM] Client Accepted From: " + acceptedSocket.ToString()));
             
-            Task.Run(() => { tcpReceive(playerDList[playerid]); }, cts.Token);
+            Task.Run(() => { tcpReceive(playerid); }, cts.Token);                               // tcp Receive
 
-            Task.Run(() => { tcpAccept(); }, cts.Token);
 
             //Task.Run(() => { udpSend(); }, cts.Token);
         }
@@ -159,47 +181,60 @@ public class NetServer : MonoBehaviour
                 => ConPrint(ex.ToString()));
             throw;
         }
+
+        tcpAccept();                                                                                        // recursive
         
     }
 
-    public static void tcpReceive(Player player)
+    public static void tcpReceive(short playerID)
     {
         try
         {
-            Array.Clear(player.tcpBuffer, 0, player.tcpBuffer.Length);
-            int recv = player.playerTCPSocket.Receive(player.tcpBuffer);
+            Array.Clear(playerDList[playerID].tcpBuffer, 0, playerDList[playerID].tcpBuffer.Length);
+            int recv = playerDList[playerID].playerTCPSocket.Receive(playerDList[playerID].tcpBuffer);
 
-            short[] header = new short[1];
-            Buffer.BlockCopy(player.tcpBuffer, 0, header, 0, 2);
-            byte[] byContent = new byte[player.tcpBuffer.Length - 2];
-            Buffer.BlockCopy(player.tcpBuffer, 2, byContent, 0, byContent.Length);
+            short[] header = new short[2];
+            Buffer.BlockCopy(playerDList[playerID].tcpBuffer, 0, header, 0, 2);
+            
 
             switch (header[0])
             {
                 // First Login
                 case 0:
-                    string name = Encoding.ASCII.GetString(player.tcpBuffer, 2, recv - 2);
-                    player.playerName = name;
-                    UnityMainThreadDispatcher.Instance().Enqueue(()
-                        => ConPrint("Get name: " + name));
+                    byte[] content = new byte[recv - 2];
+                    Buffer.BlockCopy(playerDList[playerID].tcpBuffer, 2, content, 0, recv - 2);
+                    playerDList[playerID].SetPlayer(ref content);
 
-                    byte[] msg = new byte[header.Length * 2 * 2];
-                    header[0] = 0;
-                    Buffer.BlockCopy(header, 0, msg, 0, 2);
-                    header[0] = player.playerID;
-                    Buffer.BlockCopy(header, 0, msg, 2, 2);
-                    tcpSend(player, msg);
+                    string[] contents = Encoding.ASCII.GetString(playerDList[playerID].tcpBuffer, 2, recv - 2).Split("#");
+                    
+                    UnityMainThreadDispatcher.Instance().Enqueue(()
+                        => ConPrint("Get name: " + contents[0]));
 
                     UnityMainThreadDispatcher.Instance().Enqueue(()
-                        => ConPrint("ID Sent: " + header[0]));
+                        => ConPrint("Get kartID: " + contents[1]));
+
+                    byte[] byID = new byte[4];
+                    short[] idBackHeader = new short[2];
+                    idBackHeader[0] = 0;
+                    idBackHeader[1] = playerDList[playerID].playerID;
+                    Buffer.BlockCopy(idBackHeader, 0, byID, 0, 4);
+                    tcpSend(playerDList[playerID], byID);
+                    
+                    UnityMainThreadDispatcher.Instance().Enqueue(()
+                        => ConPrint("ID Sent: " + idBackHeader[1]));
+
+                    break;
+
+                case 9:
+                    byte[] byLate = new byte[2];
+                    Buffer.BlockCopy(header, 0, byLate, 0, 2);
+                    tcpSend(playerDList[playerID], byLate);
+                    Debug.Log("Latency send Back");
                     break;
 
                 default:
                     break;
             }
-
-            Task.Run(() => { tcpReceive(player); }, cts.Token);
-            Task.Run(() => { udpReceive(); }, cts.Token);
         }
         catch (Exception ex)
         {
@@ -207,7 +242,7 @@ public class NetServer : MonoBehaviour
                 => ConPrint(ex.ToString()));
             throw;
         }
-        
+        tcpReceive(playerID);                                                                                     // tcp receive recursive
     }
 
     public static void tcpSend(Player player, byte[] msg)
@@ -215,7 +250,7 @@ public class NetServer : MonoBehaviour
         player.playerTCPSocket.Send(msg);
     }
 
-    public static void udpReceive()
+    public static void udpReceive()                                                                              // udp receive
     {
         try
         {
@@ -234,18 +269,7 @@ public class NetServer : MonoBehaviour
 
             if (playerDList.ContainsKey(shortBuffer[1]))
             {
-                
-                if(clientEP is IPEndPoint ipEP)
-                {
-                    //playerDList[shortBuffer[1]].playerEP.Address = ipEP.Address;
-                    //playerDList[shortBuffer[1]].playerEP.Port = ipEP.Port;
-                    //playerDList[shortBuffer[1]].SetPlayerUDPEndpoint(ipEP);
-                }
-
                 playerDList[shortBuffer[1]].SetPlayerUDPEndpoint(clientEP);
-                
-                
-
             }
 
             switch (shortBuffer[0])
@@ -270,39 +294,22 @@ public class NetServer : MonoBehaviour
                                  + playerDList[shortBuffer[1]].playerRotation[2]));
                     }
 
-                    /*
-                    byte[] tempBuffer = new byte[512];
-                    tempBuffer = Encoding.ASCII.GetBytes("UDP SEND TEST!");
-                    serverUDP.Send(tempBuffer, tempBuffer.Length, clientEP);
-                    */
+                    byte[] transBuffer = new byte[2 + 26 * playerDList.Count];
+                    short[] headerBuffer = { 0, -1};
 
-                    
-                    byte[] transBuffer = new byte[26];
-                    short[] headerBuffer = new short[1];
-                    foreach (Player selectedPlayer in playerDList.Values)
-                    {
-                        
-                    }
+                    Buffer.BlockCopy(headerBuffer, 0, transBuffer, 0, 2);
 
+                    int ind = 0;
                     foreach (Player player in playerDList.Values)
                     {
-                        if (player.playerID != playerDList[shortBuffer[1]].playerID)
-                        {
-                            headerBuffer[0] = player.playerID;
-                            Buffer.BlockCopy(headerBuffer, 0, transBuffer, 0, 2);
-                            Buffer.BlockCopy(player.playerPosition, 0, transBuffer, 2, 12);
-                            Buffer.BlockCopy(player.playerRotation, 0, transBuffer, 14, 12);
-                            //serverUDP.Send(transBuffer, transBuffer.Length, selectedPlayer.playerEP);
-                            //EndPoint ep = selectedPlayer.playerEP;
-                            //serverUDPSocket.SendTo(transBuffer, ep);
-                            serverUDP.Send(transBuffer, transBuffer.Length, clientEP);
-                            Debug.Log("Send to: " + clientEP.Address +  "\nInfo: " + playerDList[shortBuffer[1]].playerID + " " + clientEP.Address + " " + clientEP.Port + " \n"
-                                + player.playerPosition[0] + " " + player.playerPosition[1] + " " + player.playerPosition[2]
-                                + "\n" + player.playerRotation);
-
-                        }
+                        headerBuffer[1] = player.playerID;
+                        Buffer.BlockCopy(headerBuffer, 2, transBuffer, ind * 26 + 2, 2);
+                        Buffer.BlockCopy(player.playerPosition, 0, transBuffer, ind * 26 + 2 + 2, 12);
+                        Buffer.BlockCopy(player.playerRotation, 0, transBuffer, ind * 26 + 2 + 2 + 12, 12);
+                        ind++;
                     }
 
+                    serverUDP.Send(transBuffer, transBuffer.Length, clientEP);
 
                     break;
 
@@ -317,70 +324,42 @@ public class NetServer : MonoBehaviour
                 => ConPrint(ex.ToString()));
             throw;
         }
-
-        udpReceive();
+            
+        udpReceive();                                                                                                           // udp recursive
     }
 
-    public static void udpSend()
+    void tcpPlayerDListSend()
     {
-        if(udpSendTimer >= udpSendTimeInterval)
+        if(playerDList.Count > 0)
         {
-            try
+
+            foreach (Player player in playerDList.Values)
             {
-                byte[] tempBuffer = new byte[512];
-                tempBuffer = Encoding.ASCII.GetBytes("UDP SEND TEST!");
-
-                
-
-                foreach (Player player in playerDList.Values)
-                {
-                    if(player.udpIsSetup) serverUDP.Send(tempBuffer, tempBuffer.Length, player.playerEP);
-
-
-                }    
-
-                /*
-                byte[] transBuffer = new byte[512];
-                transBuffer = Encoding.ASCII.GetBytes("UDP SEND TEST!");
-
-                foreach (Player player in playerDList.Values)
-                {
-                    //serverUDPSocket.SendTo(transBuffer, player.playerEP);
-                    serverUDP.Send(transBuffer, transBuffer.Length, player.playerEP);
-                }
-
-                
-                foreach (Player selectedPlayer in playerDList.Values)
-                {
-                    foreach (Player player in playerDList.Values)
-                    {
-                        if(player.playerID != selectedPlayer.playerID)
-                        {
-                            short[] headerBuffer = {player.playerID};
-                            Buffer.BlockCopy(headerBuffer, 0, transBuffer, 0, 2);
-                            Buffer.BlockCopy(player.playerPosition, 0, transBuffer, 2, 12);
-                            Buffer.BlockCopy(player.playerRotation, 0, transBuffer, 14, 12);
-                            //serverUDP.Send(transBuffer, transBuffer.Length, selectedPlayer.playerEP);
-                            EndPoint ep = selectedPlayer.playerEP;
-                            serverUDPSocket.SendTo(transBuffer, ep);
-                            Debug.Log("Send to: " + selectedPlayer.playerID + " " + selectedPlayer.playerEP.Address + " " + selectedPlayer.playerEP.Port);
-                        }
-                    }
-                }
-                */
+                Debug.Log(player.playerID + ": " + player.playerName + " KID: " + player.playerKartID);
             }
-            catch (Exception ex)
+            /*
+            short[] backHeader = new short[1];
+            backHeader[0] = 1;
+            string dlistToSend = string.Empty;
+
+            foreach (Player player in playerDList.Values)
             {
-
-                Debug.Log(ex.ToString());
-                throw;
+                dlistToSend += player.playerID.ToString() + "," + player.playerName + "," + player.playerKartID + "#";
             }
+            dlistToSend = dlistToSend.Substring(0, dlistToSend.Length - 1);
+            Debug.Log(dlistToSend);
 
-            udpSendTimer -= udpSendTimeInterval;
+            byte[] byDlist = new byte[2 + dlistToSend.Length];
+
+            Buffer.BlockCopy(backHeader, 0, byDlist, 0, 2);
+            Buffer.BlockCopy(Encoding.ASCII.GetBytes(dlistToSend), 0, byDlist, 2, byDlist.Length - 2);
+
+            foreach (Player player in playerDList.Values)
+            {
+                tcpSend(player, byDlist);
+            }
+            */
         }
-        
-
-        udpSend();
     }
 
     public static void ConPrint(string cont)
@@ -393,9 +372,9 @@ public class NetServer : MonoBehaviour
     private void OnApplicationQuit()
     {
         cts.Cancel();
-        serverTCPSocket.Close();
-        serverUDPSocket.Close();
-        serverUDP.Close();
+        if(serverTCPSocket != null) serverTCPSocket.Close();
+        if(serverUDPSocket != null) serverUDPSocket.Close();
+        if (serverUDP != null) serverUDP.Close();
     }
 
 }
